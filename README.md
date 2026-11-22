@@ -13,14 +13,18 @@ desktop foundation.
 
 - Native Rust desktop UI (egui/eframe), no web runtime.
 - Component palette with resistors, capacitors, inductors, diodes, ground,
-  voltage sources and switches.
-- Pan/zoom canvas: place, select, move and delete components; wire two pins by
-  clicking them in turn.
-- Live netlist computed with union-find, plus an editable property inspector.
-- BOM grouped by `(kind, value)`; CSV bill of materials and standalone SVG
-  schematic export.
+  voltage sources, switches, transistors, op amps and connectors.
+- Pan/zoom canvas with a 20-unit snap grid and zoom-to-fit (`F`): place, select,
+  move, rotate (`R`) and delete components; wire two pins by clicking them.
+- Orthogonal wire routing (horizontal/vertical segments) with automatic
+  junction detection; wires can be selected and deleted independently.
+- Live named netlist computed with union-find over wires and junctions, plus an
+  editable label/value inspector.
+- BOM grouped by `(kind, value)`; CSV bill of materials plus standalone SVG and
+  PDF schematic exports.
 - Symbols are drawn directly on the egui painter; no PCB or SPICE simulation.
 - Versioned JSON project files with atomic saves and bounded undo/redo.
+  Documents written by v0.1.0 load unchanged (schema 1 is preserved).
 - Offline-first: no account, no telemetry, no network required.
 
 ## Run
@@ -53,8 +57,8 @@ Linux windowing development packages are installed by the CI workflow.
 src/main.rs       CLI and window startup
 src/app.rs        UI, palette, canvas and inspector
 src/document.rs   components, pins, wires and document model
-src/symbols.rs    pure symbol geometry shared by both renderers
-src/logic.rs      netlist, BOM, CSV and SVG export
+src/symbols.rs    pure symbol geometry shared by all renderers
+src/logic.rs      wire routes, junctions, netlist, BOM, CSV/SVG/PDF exports
 ```
 
 The application depends on pinned CraftKit crates from Git. Keep the tag in

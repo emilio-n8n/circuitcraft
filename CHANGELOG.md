@@ -4,15 +4,23 @@ All notable changes to CircuitCraft are documented here.
 
 ## [Unreleased]
 
+Productisation slice toward v0.2.0. No tag or release is created here; the
+project format stays `circuitcraft`, schema 1.
+
 ### Added
 
-- Circuit document with seven component kinds, pins and wires, plus a sample
-  source → resistor → LED → ground circuit.
-- Union-find netlist, BOM grouped by `(kind, value)`, CSV and SVG exporters.
-- Schematic editor: palette, pan/zoom canvas, placement, selection, dragging,
-  deletion, pin-to-pin wiring, netlist and property panels.
-- Domain tests for netlist, deletion cleanup, BOM grouping, JSON round-trip,
-  undo/redo of a move and SVG escaping.
+- Component rotation in 90° steps (`R` key, toolbar and inspector), stored as a
+  serde-defaulted `rotation` field; pins and symbols rotate with the component.
+- Orthogonal wire routing with automatic junction detection at shared pins and
+  crossings; individual wires can be selected and deleted.
+- Named nets (`GND`, `V+`, `N<n>`) from union-find over pins and junctions.
+- PDF schematic export alongside CSV and SVG.
+- Grid snapping (20 units, toggleable), zoom-to-fit (`F`) and a richer palette
+  with transistor, op amp and connector symbols.
+- v0.2 JSON fields use `#[serde(default)]`: v0.1.0 documents open unchanged and
+  no schema migration is required.
+- Domain tests for rotation, orthogonal routes, junction merging, named nets,
+  SVG/PDF validity and escaping, CSV, round-trip and undo/redo.
 
 ## [0.1.0] - 2026-11-22
 

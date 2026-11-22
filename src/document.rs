@@ -3,7 +3,8 @@
 //! The document is a self-contained schematic: components, the wires between
 //! their pins, and an id counter. It has no UI or rendering dependency so it can
 //! be serialized, diffed by the undo history and processed by pure domain
-//! functions.
+//! functions. Fields added after v0.1.0 use `serde(default)` so the project
+//! format stays `circuitcraft`, schema 1.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,11 +25,17 @@ pub enum ComponentKind {
     VoltageSource,
     /// Two-terminal switch.
     Switch,
+    /// NPN transistor with base, collector and emitter.
+    Transistor,
+    /// Operational amplifier with inverting, non-inverting and output pins.
+    OpAmp,
+    /// Two-pin connector.
+    Connector,
 }
 
 impl ComponentKind {
     /// All kinds, in palette order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::Resistor,
         Self::Capacitor,
         Self::Inductor,
@@ -36,6 +43,9 @@ impl ComponentKind {
         Self::Ground,
         Self::VoltageSource,
         Self::Switch,
+        Self::Transistor,
+        Self::OpAmp,
+        Self::Connector,
     ];
 
     /// Short human-readable name.
@@ -49,6 +59,9 @@ impl ComponentKind {
             Self::Ground => "Ground",
             Self::VoltageSource => "Voltage source",
             Self::Switch => "Switch",
+            Self::Transistor => "Transistor",
+            Self::OpAmp => "Op amp",
+            Self::Connector => "Connector",
         }
     }
 
@@ -63,6 +76,9 @@ impl ComponentKind {
             Self::Ground => "",
             Self::VoltageSource => "5V",
             Self::Switch => "SW",
+            Self::Transistor => "NPN",
+            Self::OpAmp => "LM358",
+            Self::Connector => "2-pin",
         }
     }
 
@@ -70,10 +86,14 @@ impl ComponentKind {
     #[must_use]
     pub const fn pins(self) -> &'static [&'static str] {
         match self {
-            Self::Resistor | Self::Capacitor | Self::Inductor | Self::Switch => &["1", "2"],
+            Self::Resistor | Self::Capacitor | Self::Inductor | Self::Switch | Self::Connector => {
+                &["1", "2"]
+            }
             Self::Diode => &["A", "K"],
             Self::Ground => &["1"],
             Self::VoltageSource => &["+", "-"],
+            Self::Transistor => &["B", "C", "E"],
+            Self::OpAmp => &["+", "-", "OUT"],
         }
     }
 
@@ -81,12 +101,14 @@ impl ComponentKind {
     #[must_use]
     pub const fn pin_layout(self) -> &'static [(&'static str, f64, f64)] {
         match self {
-            Self::Resistor | Self::Capacitor | Self::Inductor | Self::Switch => {
+            Self::Resistor | Self::Capacitor | Self::Inductor | Self::Switch | Self::Connector => {
                 &[("1", -40.0, 0.0), ("2", 40.0, 0.0)]
             }
             Self::Diode => &[("A", -40.0, 0.0), ("K", 40.0, 0.0)],
             Self::Ground => &[("1", 0.0, 0.0)],
             Self::VoltageSource => &[("+", 0.0, -40.0), ("-", 0.0, 40.0)],
+            Self::Transistor => &[("B", -40.0, 0.0), ("C", 20.0, -40.0), ("E", 20.0, 40.0)],
+            Self::OpAmp => &[("+", -40.0, 20.0), ("-", -40.0, -20.0), ("OUT", 40.0, 0.0)],
         }
     }
 
@@ -98,6 +120,30 @@ impl ComponentKind {
             .find(|(pin, _, _)| *pin == name)
             .map(|(_, dx, dy)| (*dx, *dy))
     }
+}
+
+/// Rotate a two-dimensional offset clockwise by whole quarter turns.
+///
+/// The schematic uses screen conventions (Y grows downwards), so one quarter
+/// turn maps a right-pointing offset `(1, 0)` to a down-pointing `(0, 1)`.
+#[must_use]
+pub fn rotate_offset(dx: f64, dy: f64, quarter_turns: u8) -> (f64, f64) {
+    match quarter_turns % 4 {
+        1 => (-dy, dx),
+        2 => (-dx, -dy),
+        3 => (dy, -dx),
+        _ => (dx, dy),
+    }
+}
+
+/// How a wire is routed between its two pins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireRoute {
+    /// A single straight segment (v0.1.0 behaviour when explicit).
+    Straight,
+    /// Horizontal and vertical segments with at most one bend.
+    #[default]
+    Orthogonal,
 }
 
 /// A reference to one pin of one component.
@@ -135,13 +181,17 @@ pub struct Component {
     pub label: String,
     /// Editable value, for example `330R`.
     pub value: String,
+    /// Clockwise quarter turns; added in v0.2, defaults to zero.
+    #[serde(default)]
+    pub rotation: u8,
 }
 
 impl Component {
-    /// World-space position of a named pin.
+    /// World-space position of a named pin, accounting for rotation.
     #[must_use]
     pub fn pin_position(&self, name: &str) -> Option<(f64, f64)> {
         let (dx, dy) = self.kind.pin_offset(name)?;
+        let (dx, dy) = rotate_offset(dx, dy, self.rotation);
         Some((self.x + dx, self.y + dy))
     }
 }
@@ -155,6 +205,9 @@ pub struct Wire {
     pub a: Pin,
     /// Second endpoint.
     pub b: Pin,
+    /// Routing style; added in v0.2, defaults to orthogonal.
+    #[serde(default)]
+    pub route: WireRoute,
 }
 
 /// A self-contained circuit schematic.
@@ -192,8 +245,14 @@ impl Document {
             y,
             label: label.into(),
             value: value.into(),
+            rotation: 0,
         };
-        let wire = |id, a: Pin, b: Pin| Wire { id, a, b };
+        let wire = |id, a: Pin, b: Pin| Wire {
+            id,
+            a,
+            b,
+            route: WireRoute::Orthogonal,
+        };
         Self {
             title: "CircuitCraft sample".into(),
             components: vec![
@@ -228,6 +287,7 @@ impl Document {
             y,
             label,
             value: kind.default_value().into(),
+            rotation: 0,
         });
         id
     }
@@ -241,7 +301,12 @@ impl Document {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.wires.push(Wire { id, a, b });
+        self.wires.push(Wire {
+            id,
+            a,
+            b,
+            route: WireRoute::Orthogonal,
+        });
         Some(id)
     }
 
@@ -257,6 +322,27 @@ impl Document {
         self.wires
             .retain(|wire| wire.a.component != id && wire.b.component != id);
         true
+    }
+
+    /// Remove a wire by id.
+    pub fn remove_wire(&mut self, id: u64) -> bool {
+        let before = self.wires.len();
+        self.wires.retain(|wire| wire.id != id);
+        self.wires.len() != before
+    }
+
+    /// Rotate a component by whole quarter turns, keeping its centre fixed.
+    pub fn rotate_component(&mut self, id: u64, quarter_turns: u8) -> bool {
+        if let Some(component) = self
+            .components
+            .iter_mut()
+            .find(|component| component.id == id)
+        {
+            component.rotation = (component.rotation + quarter_turns) % 4;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -274,6 +360,12 @@ mod tests {
         assert_eq!(document.components[1].kind, ComponentKind::Resistor);
         assert_eq!(document.components[2].kind, ComponentKind::Diode);
         assert_eq!(document.components[3].kind, ComponentKind::Ground);
+        assert!(
+            document
+                .wires
+                .iter()
+                .all(|wire| wire.route == WireRoute::Orthogonal)
+        );
     }
 
     #[test]
@@ -286,17 +378,69 @@ mod tests {
             document
                 .wires
                 .iter()
-                .all(|wire| { wire.a.component != 2 && wire.b.component != 2 })
+                .all(|wire| wire.a.component != 2 && wire.b.component != 2)
         );
         assert!(!document.remove_component(2));
     }
 
     #[test]
-    fn pin_position_respects_kind() {
+    fn removing_a_wire_keeps_components() {
+        let mut document = Document::sample();
+        assert!(document.remove_wire(6));
+        assert_eq!(document.wires.len(), 3);
+        assert_eq!(document.components.len(), 4);
+        assert!(!document.remove_wire(6));
+    }
+
+    #[test]
+    fn pin_position_respects_kind_and_rotation() {
         let document = Document::sample();
         let resistor = &document.components[1];
         assert_eq!(resistor.pin_position("1"), Some((120.0, -40.0)));
         assert_eq!(resistor.pin_position("2"), Some((200.0, -40.0)));
         assert_eq!(resistor.pin_position("nope"), None);
+
+        let mut rotated = resistor.clone();
+        rotated.rotation = 1;
+        assert_eq!(rotated.pin_position("1"), Some((160.0, -80.0)));
+        assert_eq!(rotated.pin_position("2"), Some((160.0, 0.0)));
+        rotated.rotation = 2;
+        assert_eq!(rotated.pin_position("1"), Some((200.0, -40.0)));
+    }
+
+    #[test]
+    fn rotation_cycles_and_keeps_centre() {
+        let mut document = Document::sample();
+        assert!(document.rotate_component(2, 1));
+        assert_eq!(document.components[1].rotation, 1);
+        assert!(document.rotate_component(2, 3));
+        assert_eq!(document.components[1].rotation, 0);
+        assert_eq!(
+            (document.components[1].x, document.components[1].y),
+            (160.0, -40.0)
+        );
+        assert!(!document.rotate_component(999, 1));
+    }
+
+    #[test]
+    fn new_kinds_expose_their_pins() {
+        assert_eq!(ComponentKind::Transistor.pins(), &["B", "C", "E"]);
+        assert_eq!(ComponentKind::OpAmp.pins(), &["+", "-", "OUT"]);
+        assert_eq!(ComponentKind::Connector.pins(), &["1", "2"]);
+        assert_eq!(ComponentKind::ALL.len(), 10);
+    }
+
+    #[test]
+    fn v0_1_json_without_new_fields_still_loads() {
+        let old = r#"{
+            "title":"legacy",
+            "components":[{"id":1,"kind":"Resistor","x":0.0,"y":0.0,
+                           "label":"R1","value":"10R"}],
+            "wires":[],
+            "next_id":2
+        }"#;
+        let document: Document = serde_json::from_str(old).expect("legacy document");
+        assert_eq!(document.components[0].rotation, 0);
+        assert_eq!(document.components[0].pin_position("1"), Some((-40.0, 0.0)));
     }
 }

@@ -21,6 +21,7 @@ const FORMAT: &str = "circuitcraft";
 const SCHEMA_VERSION: u32 = 1;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const GRID: f32 = 40.0;
+const SNAP: f32 = 20.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -36,6 +37,9 @@ enum Action {
     SaveAs,
     ExportCsv,
     ExportSvg,
+    ExportPdf,
+    Rotate,
+    Fit,
     Undo,
     Redo,
     Delete,
@@ -60,6 +64,7 @@ enum PendingChoice {
 enum Hit {
     Pin(Pin),
     Component(u64),
+    Wire(u64),
     None,
 }
 
@@ -76,12 +81,14 @@ pub struct CircuitApp {
     shell: AppShell,
     host: DocumentHost<Document>,
     selected: Option<u64>,
+    selected_wire: Option<u64>,
     tool: Tool,
     armed_kind: Option<ComponentKind>,
     wire_start: Option<Pin>,
     pan: Vec2,
     zoom: f32,
     needs_fit: bool,
+    snap_enabled: bool,
     drag: Option<DragState>,
     prop_gesture_active: bool,
     prop_gain_pending: bool,
@@ -109,12 +116,14 @@ impl CircuitApp {
             shell,
             host: DocumentHost::new(document, FORMAT, SCHEMA_VERSION, APP_VERSION),
             selected: None,
+            selected_wire: None,
             tool: Tool::Select,
             armed_kind: None,
             wire_start: None,
             pan: Vec2::new(60.0, 160.0),
             zoom: 1.0,
             needs_fit: true,
+            snap_enabled: true,
             drag: None,
             prop_gesture_active: false,
             prop_gain_pending: false,
@@ -154,6 +163,7 @@ impl CircuitApp {
 
     fn reset_interaction(&mut self) {
         self.selected = None;
+        self.selected_wire = None;
         self.tool = Tool::Select;
         self.armed_kind = None;
         self.wire_start = None;
@@ -240,6 +250,23 @@ impl CircuitApp {
         }
     }
 
+    fn export_pdf(&mut self) {
+        let content = logic::document_pdf(self.host.document());
+        let default_name = format!("{}.pdf", slugify(&self.host.document().title));
+        let Some(path) = dialogs::save_project("Export schematic as PDF", &default_name, "pdf")
+        else {
+            return;
+        };
+        match std::fs::write(&path, content) {
+            Ok(()) => self
+                .shell
+                .set_status(format!("Exported PDF to {}", path.display())),
+            Err(error) => self
+                .shell
+                .notify(Tone::Error, "Could not export PDF", error.to_string()),
+        }
+    }
+
     fn request_new(&mut self) {
         self.finish_prop_gesture();
         if self.host.is_dirty() {
@@ -285,15 +312,33 @@ impl CircuitApp {
         }
     }
 
-    fn delete_selected(&mut self) {
+    fn rotate_selected(&mut self) {
         let Some(id) = self.selected else {
+            self.shell.set_status("Select a component to rotate (R)");
             return;
         };
         self.finish_prop_gesture();
         self.host.apply(|document| {
+            document.rotate_component(id, 1);
+        });
+        self.shell.set_status("Component rotated 90°");
+    }
+
+    fn delete_selected(&mut self) {
+        self.finish_prop_gesture();
+        if let Some(id) = self.selected_wire.take() {
+            self.host.apply(|document| {
+                document.remove_wire(id);
+            });
+            self.shell.set_status("Wire deleted");
+            return;
+        }
+        let Some(id) = self.selected.take() else {
+            return;
+        };
+        self.host.apply(|document| {
             document.remove_component(id);
         });
-        self.selected = None;
         self.wire_start = None;
         self.shell.set_status("Component deleted");
     }
@@ -310,10 +355,14 @@ impl CircuitApp {
             }
             Action::ExportCsv => self.export_csv(),
             Action::ExportSvg => self.export_svg(),
+            Action::ExportPdf => self.export_pdf(),
+            Action::Rotate => self.rotate_selected(),
+            Action::Fit => self.needs_fit = true,
             Action::Undo => {
                 self.finish_prop_gesture();
                 if self.host.undo() {
                     self.selected = None;
+                    self.selected_wire = None;
                     self.shell.set_status("Undo");
                 }
             }
@@ -321,6 +370,7 @@ impl CircuitApp {
                 self.finish_prop_gesture();
                 if self.host.redo() {
                     self.selected = None;
+                    self.selected_wire = None;
                     self.shell.set_status("Redo");
                 }
             }
@@ -350,6 +400,10 @@ impl CircuitApp {
                 Some(Action::Undo)
             } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::Y) {
                 Some(Action::Redo)
+            } else if input.key_pressed(egui::Key::R) {
+                Some(Action::Rotate)
+            } else if input.key_pressed(egui::Key::F) {
+                Some(Action::Fit)
             } else if input.key_pressed(egui::Key::Delete)
                 || input.key_pressed(egui::Key::Backspace)
             {
@@ -396,6 +450,10 @@ impl CircuitApp {
                     action = Some(Action::ExportSvg);
                     ui.close();
                 }
+                if ui.button("Export Schematic (PDF)...").clicked() {
+                    action = Some(Action::ExportPdf);
+                    ui.close();
+                }
             });
             ui.menu_button("Edit", |ui| {
                 if ui
@@ -410,6 +468,10 @@ impl CircuitApp {
                     .clicked()
                 {
                     action = Some(Action::Redo);
+                    ui.close();
+                }
+                if ui.button("Rotate selection (R)").clicked() {
+                    action = Some(Action::Rotate);
                     ui.close();
                 }
                 if ui.button("Delete selection").clicked() {
@@ -432,11 +494,14 @@ impl CircuitApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let components = self.host.document().components.len();
         let wires = self.host.document().wires.len();
+        let nets = logic::netlist(self.host.document()).len();
         self.shell.status_bar_with(ui, |ui| {
             ui.label(
-                RichText::new(format!("{components} components · {wires} wires"))
-                    .size(10.5)
-                    .color(theme::FAINT),
+                RichText::new(format!(
+                    "{components} components · {wires} wires · {nets} nets"
+                ))
+                .size(10.5)
+                .color(theme::FAINT),
             );
         });
     }
@@ -478,7 +543,7 @@ impl CircuitApp {
                         .color(theme::FAINT),
                 );
                 ui.label(
-                    RichText::new("Esc cancels placement or wiring.")
+                    RichText::new("R rotates · F fits · Del removes · Esc cancels")
                         .size(10.5)
                         .color(theme::FAINT),
                 );
@@ -496,10 +561,11 @@ impl CircuitApp {
         let mut gain = false;
         let mut lost = false;
         let mut delete = false;
+        let mut rotate = false;
         egui::Panel::right("circuit-inspector")
             .resizable(true)
-            .default_size(260.0)
-            .min_size(200.0)
+            .default_size(270.0)
+            .min_size(210.0)
             .show(ui, |ui| {
                 widgets::section_label(ui, "Netlist");
                 ui.add_space(4.0);
@@ -513,7 +579,7 @@ impl CircuitApp {
                     .show(ui, |ui| {
                         for (net, label) in nets.iter().zip(labels) {
                             ui.label(
-                                RichText::new(format!("Net {}", net.id))
+                                RichText::new(format!("{}  ·  {}", net.name, net.id))
                                     .size(11.0)
                                     .strong()
                                     .color(theme::ACCENT),
@@ -525,7 +591,32 @@ impl CircuitApp {
                 ui.separator();
                 widgets::section_label(ui, "Properties");
                 ui.add_space(4.0);
-                if let Some(id) = self.selected {
+
+                if let Some(id) = self.selected_wire {
+                    let wire = self
+                        .host
+                        .document()
+                        .wires
+                        .iter()
+                        .find(|wire| wire.id == id)
+                        .cloned();
+                    if let Some(wire) = wire {
+                        ui.label(RichText::new(format!("Wire #{id}")).strong());
+                        let description = format!(
+                            "{} → {}",
+                            pin_label(self.host.document(), &wire.a),
+                            pin_label(self.host.document(), &wire.b)
+                        );
+                        ui.label(RichText::new(description).size(10.5).color(theme::MUTED));
+                        ui.label(
+                            RichText::new(format!("{:?} routing", wire.route))
+                                .size(10.5)
+                                .color(theme::FAINT),
+                        );
+                    } else {
+                        self.selected_wire = None;
+                    }
+                } else if let Some(id) = self.selected {
                     let exists = self
                         .host
                         .document()
@@ -536,6 +627,7 @@ impl CircuitApp {
                         self.selected = None;
                     }
                 }
+
                 if let Some(id) = self.selected {
                     let (gained, lost_focus) = {
                         let component = self
@@ -547,9 +639,13 @@ impl CircuitApp {
                             .find(|component| component.id == id);
                         if let Some(component) = component {
                             ui.label(
-                                RichText::new(format!("{} · id {id}", component.kind.name()))
-                                    .size(10.5)
-                                    .color(theme::MUTED),
+                                RichText::new(format!(
+                                    "{} · id {id} · {}°",
+                                    component.kind.name(),
+                                    component.rotation * 90
+                                ))
+                                .size(10.5)
+                                .color(theme::MUTED),
                             );
                             let label_response = ui
                                 .horizontal(|ui| {
@@ -573,14 +669,23 @@ impl CircuitApp {
                     };
                     gain = gained;
                     lost = lost_focus;
+                    if widgets::toolbar_button(ui, "Rotate 90° (R)", "Rotate the component")
+                        .clicked()
+                    {
+                        rotate = true;
+                    }
                     if widgets::toolbar_button(ui, "Delete component", "Remove it and its wires")
                         .clicked()
                     {
                         delete = true;
                     }
+                } else if self.selected_wire.is_some() {
+                    if widgets::toolbar_button(ui, "Delete wire", "Remove this wire").clicked() {
+                        delete = true;
+                    }
                 } else {
                     ui.label(
-                        RichText::new("Select a component to edit its label and value.")
+                        RichText::new("Select a component or a wire to edit it.")
                             .size(10.5)
                             .color(theme::FAINT),
                     );
@@ -594,6 +699,9 @@ impl CircuitApp {
             self.host.history_mut().end_gesture();
             self.prop_gesture_active = false;
         }
+        if rotate {
+            self.rotate_selected();
+        }
         if delete {
             self.delete_selected();
         }
@@ -602,13 +710,22 @@ impl CircuitApp {
     fn central_panel(&mut self, ui: &mut egui::Ui) {
         let mut fit = false;
         let mut tool = None;
+        let mut rotate = false;
+        let mut toggle_snap = false;
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Schematic");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::toolbar_button(ui, "Fit", "Center and scale the circuit").clicked()
+                    if ui.checkbox(&mut self.snap_enabled, "Snap").changed() {
+                        toggle_snap = true;
+                    }
+                    if widgets::toolbar_button(ui, "Fit", "Center and scale the circuit (F)")
+                        .clicked()
                     {
                         fit = true;
+                    }
+                    if widgets::toolbar_button(ui, "Rotate", "Rotate selection (R)").clicked() {
+                        rotate = true;
                     }
                     if ui
                         .add(egui::Button::new("Wire").selected(self.tool == Tool::Wire))
@@ -638,6 +755,16 @@ impl CircuitApp {
         if fit {
             self.needs_fit = true;
         }
+        if rotate {
+            self.rotate_selected();
+        }
+        if toggle_snap {
+            self.shell.set_status(if self.snap_enabled {
+                "Snapping to 20-unit grid"
+            } else {
+                "Snapping disabled"
+            });
+        }
         if let Some(tool) = tool {
             self.finish_prop_gesture();
             self.tool = tool;
@@ -666,11 +793,11 @@ impl CircuitApp {
             for component in &self.host.document().components {
                 min = min.min(Vec2::new(
                     component.x as f32 - 60.0,
-                    component.y as f32 - 60.0,
+                    component.y as f32 - 70.0,
                 ));
                 max = max.max(Vec2::new(
                     component.x as f32 + 60.0,
-                    component.y as f32 + 60.0,
+                    component.y as f32 + 70.0,
                 ));
             }
             if min.x.is_finite() {
@@ -720,6 +847,7 @@ impl CircuitApp {
                     .map_or((0.0, 0.0), |component| (component.x, component.y));
                 self.finish_prop_gesture();
                 self.selected = Some(id);
+                self.selected_wire = None;
                 self.drag = Some(DragState {
                     id,
                     start_world: to_world(local, pan, zoom),
@@ -744,8 +872,10 @@ impl CircuitApp {
                 .iter_mut()
                 .find(|component| component.id == drag.id)
             {
-                component.x = drag.start_x + f64::from(dx);
-                component.y = drag.start_y + f64::from(dy);
+                let x = drag.start_x + f64::from(dx);
+                let y = drag.start_y + f64::from(dy);
+                component.x = if self.snap_enabled { snap_coord(x) } else { x };
+                component.y = if self.snap_enabled { snap_coord(y) } else { y };
             }
         }
         if ui.input(|input| input.pointer.primary_released()) && self.drag.is_some() {
@@ -763,16 +893,20 @@ impl CircuitApp {
             match (self.tool, self.armed_kind, hit) {
                 (_, Some(kind), Hit::None) => {
                     let world = to_world(local, pan, zoom);
+                    let x = f64::from(world.x);
+                    let y = f64::from(world.y);
+                    let (x, y) = if self.snap_enabled {
+                        (snap_coord(x), snap_coord(y))
+                    } else {
+                        (x, y)
+                    };
                     let mut placed = None;
                     self.host.apply(|document| {
-                        placed = Some(document.add_component(
-                            kind,
-                            f64::from(world.x),
-                            f64::from(world.y),
-                        ));
+                        placed = Some(document.add_component(kind, x, y));
                     });
                     self.finish_prop_gesture();
                     self.selected = placed;
+                    self.selected_wire = None;
                     self.armed_kind = None;
                     self.shell.set_status(format!("Placed {}", kind.name()));
                 }
@@ -792,17 +926,25 @@ impl CircuitApp {
                 (Tool::Wire, _, _) => {
                     self.wire_start = None;
                 }
+                (Tool::Select, _, Hit::Wire(id)) => {
+                    self.finish_prop_gesture();
+                    self.selected = None;
+                    self.selected_wire = Some(id);
+                }
                 (Tool::Select, _, Hit::Component(id)) => {
                     self.finish_prop_gesture();
                     self.selected = Some(id);
+                    self.selected_wire = None;
                 }
                 (Tool::Select, _, Hit::Pin(pin)) => {
                     self.finish_prop_gesture();
                     self.selected = Some(pin.component);
+                    self.selected_wire = None;
                 }
                 (Tool::Select, _, Hit::None) => {
                     self.finish_prop_gesture();
                     self.selected = None;
+                    self.selected_wire = None;
                 }
             }
         }
@@ -856,22 +998,37 @@ impl CircuitApp {
 
         let document = self.host.document();
         for wire in &document.wires {
-            let start = pin_world(document, &wire.a);
-            let end = pin_world(document, &wire.b);
-            if let (Some(a), Some(b)) = (start, end) {
-                painter.line_segment(
-                    [to_screen(a), to_screen(b)],
-                    Stroke::new(2.5 * zoom, theme::INFO),
-                );
+            let route = logic::wire_route(document, wire);
+            let points: Vec<Pos2> = route
+                .iter()
+                .map(|(x, y)| to_screen(Vec2::new(*x as f32, *y as f32)))
+                .collect();
+            let selected = self.selected_wire == Some(wire.id);
+            let color = if selected {
+                theme::ACCENT_LIGHT
+            } else {
+                theme::INFO
+            };
+            let width = if selected { 3.5 * zoom } else { 2.5 * zoom };
+            for pair in points.windows(2) {
+                painter.line_segment([pair[0], pair[1]], Stroke::new(width, color));
             }
+        }
+        for junction in logic::junctions(document) {
+            let position = to_screen(Vec2::new(junction.point.0 as f32, junction.point.1 as f32));
+            painter.circle_filled(position, 4.0 * zoom, theme::INFO);
         }
 
         if self.tool == Tool::Wire
             && let (Some(start), Some(pointer)) = (self.wire_start.as_ref(), pointer_local)
-            && let Some(position) = pin_world(document, start)
+            && let Some(component) = document
+                .components
+                .iter()
+                .find(|component| component.id == start.component)
+            && let Some((x, y)) = component.pin_position(&start.name)
         {
             painter.line_segment(
-                [to_screen(position), to_screen(pointer)],
+                [to_screen(Vec2::new(x as f32, y as f32)), to_screen(pointer)],
                 Stroke::new(1.5, theme::ACCENT_LIGHT),
             );
         }
@@ -892,6 +1049,7 @@ impl CircuitApp {
                 component.kind,
                 component.x,
                 component.y,
+                component.rotation,
                 &component.label,
                 &component.value,
             ) {
@@ -949,13 +1107,29 @@ impl eframe::App for CircuitApp {
     }
 }
 
-fn pin_world(document: &Document, pin: &Pin) -> Option<Vec2> {
+fn snap_coord(value: f64) -> f64 {
+    (value / f64::from(SNAP)).round() * f64::from(SNAP)
+}
+
+fn pin_label(document: &Document, pin: &Pin) -> String {
     document
         .components
         .iter()
-        .find(|component| component.id == pin.component)
-        .and_then(|component| component.pin_position(&pin.name))
-        .map(|(x, y)| Vec2::new(x as f32, y as f32))
+        .find(|c| c.id == pin.component)
+        .map_or_else(
+            || format!("?{}:{}", pin.component, pin.name),
+            |component| format!("{}.{}", component.label, pin.name),
+        )
+}
+
+fn distance_to_segment(point: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let segment = b - a;
+    let length_squared = segment.length_sq();
+    if length_squared < f32::EPSILON {
+        return (point - a).length();
+    }
+    let t = ((point - a).dot(segment) / length_squared).clamp(0.0, 1.0);
+    (point - (a + segment * t)).length()
 }
 
 fn hit_test(document: &Document, local: Vec2, pan: Vec2, zoom: f32) -> Hit {
@@ -979,6 +1153,22 @@ fn hit_test(document: &Document, local: Vec2, pan: Vec2, zoom: f32) -> Hit {
         let max = center + Vec2::splat(half);
         if min.x <= local.x && local.x <= max.x && min.y <= local.y && local.y <= max.y {
             return Hit::Component(component.id);
+        }
+    }
+    for wire in &document.wires {
+        let route = logic::wire_route(document, wire);
+        for pair in route.windows(2) {
+            let a = Vec2::new(
+                pair[0].0 as f32 * zoom + pan.x,
+                pair[0].1 as f32 * zoom + pan.y,
+            );
+            let b = Vec2::new(
+                pair[1].0 as f32 * zoom + pan.x,
+                pair[1].1 as f32 * zoom + pan.y,
+            );
+            if distance_to_segment(local, a, b) <= 6.0 {
+                return Hit::Wire(wire.id);
+            }
         }
     }
     Hit::None
@@ -1073,7 +1263,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hit_test_finds_pins_and_components() {
+    fn hit_test_finds_pins_components_and_wires() {
         let document = Document::sample();
         let pan = Vec2::ZERO;
         let zoom = 1.0;
@@ -1085,10 +1275,21 @@ mod tests {
             hit_test(&document, Vec2::new(160.0, -40.0), pan, zoom),
             Hit::Component(2)
         );
+        assert!(matches!(
+            hit_test(&document, Vec2::new(60.0, -40.0), pan, zoom),
+            Hit::Wire(_)
+        ));
         assert_eq!(
             hit_test(&document, Vec2::new(-500.0, 0.0), pan, zoom),
             Hit::None
         );
+    }
+
+    #[test]
+    fn snapping_aligns_to_grid() {
+        assert_eq!(snap_coord(27.0), 20.0);
+        assert_eq!(snap_coord(32.0), 40.0);
+        assert_eq!(snap_coord(-8.0), 0.0);
     }
 
     #[test]
