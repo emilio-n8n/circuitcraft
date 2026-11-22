@@ -1,9 +1,11 @@
-//! CraftKit reference application entry point.
+//! CircuitCraft entry point: CLI parsing and eframe startup.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod document;
+mod logic;
+mod symbols;
 
 use craftkit_ui::cli::{self, CliAction};
 use craftkit_ui::{WindowOptions, run_native};
@@ -23,7 +25,7 @@ fn main() -> craftkit_ui::eframe::Result<()> {
                 "{}",
                 cli::help_text(
                     "circuitcraft",
-                    "CraftKit demo — notes application and reference implementation"
+                    "CircuitCraft — schematic capture with netlist and BOM"
                 )
             );
             return Ok(());
@@ -36,7 +38,7 @@ fn main() -> craftkit_ui::eframe::Result<()> {
     };
 
     run_native(WindowOptions::new("CircuitCraft"), move |context| {
-        let app = app::DemoApp::new(context, options);
+        let app = app::CircuitApp::new(context, options);
         Ok(Box::new(app) as Box<dyn craftkit_ui::eframe::App>)
     })
 }

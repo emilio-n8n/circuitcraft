@@ -12,10 +12,15 @@ desktop foundation.
 ## Features
 
 - Native Rust desktop UI (egui/eframe), no web runtime.
-- Versioned JSON project files with atomic saves.
-- Bounded undo/redo through the shared document history.
-- Background jobs with progress and cooperative cancellation.
-- Recent files and persisted preferences.
+- Component palette with resistors, capacitors, inductors, diodes, ground,
+  voltage sources and switches.
+- Pan/zoom canvas: place, select, move and delete components; wire two pins by
+  clicking them in turn.
+- Live netlist computed with union-find, plus an editable property inspector.
+- BOM grouped by `(kind, value)`; CSV bill of materials and standalone SVG
+  schematic export.
+- Symbols are drawn directly on the egui painter; no PCB or SPICE simulation.
+- Versioned JSON project files with atomic saves and bounded undo/redo.
 - Offline-first: no account, no telemetry, no network required.
 
 ## Run
@@ -46,9 +51,10 @@ Linux windowing development packages are installed by the CI workflow.
 
 ```text
 src/main.rs       CLI and window startup
-src/app.rs        UI, menus and lifecycle
-src/document.rs   application document model
-src/...           domain modules
+src/app.rs        UI, palette, canvas and inspector
+src/document.rs   components, pins, wires and document model
+src/symbols.rs    pure symbol geometry shared by both renderers
+src/logic.rs      netlist, BOM, CSV and SVG export
 ```
 
 The application depends on pinned CraftKit crates from Git. Keep the tag in

@@ -555,6 +555,7 @@ dependencies = [
  "craftkit-jobs",
  "craftkit-ui",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
