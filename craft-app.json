@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "circuitcraft",
+  "name": "CircuitCraft",
+  "tagline": "Schematic capture with components, wires, netlist and BOM",
+  "repo": "emilio-n8n/circuitcraft",
+  "publisher": "emilio-n8n",
+  "upstream": null,
+  "bundle_id": "io.github.emilion8n.circuitcraft",
+  "msi_publisher": "emilio-n8n",
+  "apple_team": null,
+  "website": "https://github.com/emilio-n8n/circuitcraft",
+  "color": "#f59e0b",
+  "icon": "circuitcraft-128.png"
+}
