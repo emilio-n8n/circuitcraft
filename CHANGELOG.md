@@ -2,7 +2,7 @@
 
 All notable changes to CircuitCraft are documented here.
 
-## [Unreleased]
+## [0.2.0] - 2026-11-22
 
 Productisation slice toward v0.2.0. No tag or release is created here; the
 project format stays `circuitcraft`, schema 1.
